@@ -372,4 +372,17 @@ class ScalaDocCheckerTest extends AssertionsForJUnit with CheckerTest {
     assertErrors(List(lineError(7, List(Missing))), source)
   }
 
+  @Test def nestedCaseObjectMissingDoc(): Unit = {
+    val source =
+      """
+        |/**
+        | * Doc X
+        | */
+        |case object X {
+        |
+        |  case object Y
+        |}""".stripMargin
+
+    assertErrors(List(lineError(7, List(Missing))), source)
+  }
 }

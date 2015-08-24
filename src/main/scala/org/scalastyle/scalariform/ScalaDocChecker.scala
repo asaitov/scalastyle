@@ -44,10 +44,12 @@ class ScalaDocChecker extends CombinedChecker {
 
   val DefaultIgnoreRegex = "^$"
 
-  val skipPrivate = true
-  val skipQualifiedPrivate = false
-  val skipProtected = false
-  val skipQualifiedProtected = false
+  lazy val skipPrivate = getBoolean("skipPrivate", defaultValue = true)
+  lazy val skipQualifiedPrivate = getBoolean("skipQualifiedPrivate", defaultValue = false)
+  lazy val skipProtected = getBoolean("skipProtected", defaultValue = false)
+  lazy val skipQualifiedProtected = getBoolean("skipQualifiedProtected", defaultValue = false)
+
+  lazy val units = getString("units", "object,function,type,variable,caseobject").split(",").map(_.trim).toSet
 
   override def verify(ast: CombinedAst): List[ScalastyleError] = {
     val tokens = ast.compilationUnit.tokens
@@ -120,9 +122,6 @@ class ScalaDocChecker extends CombinedChecker {
     missingScalaDocParams.map(missing => LineError(line, List(missingParam(missing)))) ++
     extraScalaDocParams.map(extra => LineError(line, List(extraParam(extra.name)))) ++
     validScalaDocParams.filter(_.text.isEmpty).map(empty => LineError(line, List(emptyParam(empty.name))))
-
-//      if (!scalaDoc.params.forall(p => paramNames.exists(name => p.name == name && !p.text.isEmpty))) List(LineError(line, List(MalformedParams)))
-//      else Nil
   }
 
   // parse the type parameters and report errors for the parameters (constructor or method)
@@ -202,7 +201,17 @@ class ScalaDocChecker extends CombinedChecker {
       // class Foo, class Foo[A](a: A);
       // case class Foo(), case class Foo[A](a: A);
       // object Foo;
-      val (_, line) = lines.findLineAndIndex(t.firstToken.offset).get
+
+      def containsMarker(value: String): Boolean = {
+        t.markerTokens.count(x => x.tokenType.name == value) > 0
+      }
+
+      def isCaseObject: Boolean = {
+        containsMarker("CASE") && containsMarker("OBJECT")
+      }
+
+      if (isCaseObject && units.contains("caseobject") || (!isCaseObject && units.contains("object"))) {
+        val (_, line) = lines.findLineAndIndex(t.firstToken.offset).get
 
       // we are checking parameters and type parameters
       val errors = if (skip) Nil else findScalaDoc(t.firstToken, fallback).
@@ -212,44 +221,57 @@ class ScalaDocChecker extends CombinedChecker {
         }.getOrElse(List(LineError(line, List(Missing))))
 
       // and we descend, because we're interested in seeing members of the types
-      errors ++ visit(t, localVisit(skip, NoHiddenTokens, lines))
+      errors ++ visit(t, localVisit(skip, NoHiddenTokens, lines)) } else {
+        Nil
+      }
     case t: FunDefOrDcl  =>
       // def foo[A, B](a: Int): B = ...
-      val (_, line) = lines.findLineAndIndex(t.firstToken.offset).get
+      if (units.contains("function")) {
+        val (_, line) = lines.findLineAndIndex(t.firstToken.offset).get
+          // we are checking parameters, type parameters and returns
+          val errors = if (skip) Nil else findScalaDoc(t.firstToken, fallback).
+            map { scalaDoc =>
+              paramErrors(line, Some(t.paramClauses))(scalaDoc) ++
+              tparamErrors(line, t.typeParamClauseOpt)(scalaDoc) ++
+              returnErrors(line, t.returnTypeOpt)(scalaDoc)
+            }.
+            getOrElse(List(LineError(line, List(Missing))))
 
-      // we are checking parameters, type parameters and returns
-      val errors = if (skip) Nil else findScalaDoc(t.firstToken, fallback).
-        map { scalaDoc =>
-          paramErrors(line, Some(t.paramClauses))(scalaDoc) ++
-          tparamErrors(line, t.typeParamClauseOpt)(scalaDoc) ++
-          returnErrors(line, t.returnTypeOpt)(scalaDoc)
-        }.
-        getOrElse(List(LineError(line, List(Missing))))
-
-      // we don't descend any further
-      errors
+          // we don't descend any further
+          errors
+        } else {
+        Nil
+      }
     case t: TypeDefOrDcl =>
       // type Foo = ...
-      val (_, line) = lines.findLineAndIndex(t.firstToken.offset).get
+      if (units.contains("type")) {
+        val (_, line) = lines.findLineAndIndex(t.firstToken.offset).get
 
-      // error is non-existence
-      val errors = if (skip) Nil else findScalaDoc(t.firstToken, fallback).
-        map(_ => Nil).
-        getOrElse(List(LineError(line, List(Missing))))
+        // error is non-existence
+        val errors = if (skip) Nil
+        else findScalaDoc(t.firstToken, fallback).
+          map(_ => Nil).
+          getOrElse(List(LineError(line, List(Missing))))
 
-      // we don't descend any further
-      errors
-
+        // we don't descend any further
+        errors
+      } else {
+        Nil
+      }
     case t: PatDefOrDcl  =>
       // val a = ...
       // var a = ...
-      val (_, line) = lines.findLineAndIndex(t.valOrVarToken.offset).get
-      val errors = if (skip) Nil else findScalaDoc(t.firstToken, fallback).
-        map(_ => Nil).
-        getOrElse(List(LineError(line, List(Missing))))
-      // we don't descend any further
-      errors
-
+      if (units.contains("variable")) {
+        val (_, line) = lines.findLineAndIndex(t.valOrVarToken.offset).get
+        val errors = if (skip) Nil
+        else findScalaDoc(t.firstToken, fallback).
+          map(_ => Nil).
+          getOrElse(List(LineError(line, List(Missing))))
+        // we don't descend any further
+        errors
+      } else {
+        Nil
+      }
     case t: StatSeq =>
       localVisit(skip, fallback, lines)(t.firstStatOpt) ++ (
         for(statOpt <- t.otherStats)
