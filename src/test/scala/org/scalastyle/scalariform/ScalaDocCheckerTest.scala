@@ -101,6 +101,30 @@ class ScalaDocCheckerTest extends AssertionsForJUnit with CheckerTest {
     }
   }
 
+  @Test def ignoreSeveralClasses(): Unit = {
+    val doc =
+      """
+        |/**
+        | * This is the documentation for whatever follows
+        | */
+      """.stripMargin
+
+    val source =
+      """
+        |/**
+        | * Doc
+        | */
+        |class IgnoreClass
+        |
+        |%sclass IgnoreAnotherClass
+      """.stripMargin
+
+    assertErrors(List(lineError(7, List(Missing))), source format "")
+    assertErrors(Nil, source format doc)
+    assertErrors(Nil, source format "", Map("ignoreRegex" -> "Ignore.*"))
+    assertErrors(Nil, source format doc, Map("ignoreRegex" -> "Ignore.*"))
+  }
+
   @Test def typeParamsCCT(): Unit = {
     val traitSource = "%strait Foo[A, B]"
     val classSource = "%sclass Foo[A, B]"
@@ -266,13 +290,15 @@ class ScalaDocCheckerTest extends AssertionsForJUnit with CheckerTest {
         |   *   More for A
         |   * @param b B
         |   * @param c
+        |   *
+        |   *
         |   * @return some integer
         |   */
         |  def foo(a: Int, b: Int, c: Int): Int = a + b
         |}
       """.stripMargin
 
-    assertErrors(List(lineError(22, List(emptyParam("c")))), source)
+    assertErrors(List(lineError(24, List(emptyParam("c")))), source)
   }
 
   @Test def valsVarsAndTypes(): Unit = {
@@ -372,4 +398,15 @@ class ScalaDocCheckerTest extends AssertionsForJUnit with CheckerTest {
     assertErrors(List(lineError(7, List(Missing))), source)
   }
 
+  @Test def emptyDoc(): Unit = {
+    val source =
+      """
+        |/**
+        | *
+        | */
+        |object X {
+        |}""".stripMargin
+
+    assertErrors(List(lineError(5, List(Missing))), source)
+  }
 }

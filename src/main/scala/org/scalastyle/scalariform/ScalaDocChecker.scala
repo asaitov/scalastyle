@@ -16,16 +16,10 @@
 
 package org.scalastyle.scalariform
 
-import org.scalastyle.CombinedAst
-import org.scalastyle.CombinedChecker
-import org.scalastyle.LineError
-import org.scalastyle.Lines
-import org.scalastyle.ScalastyleError
+import org.scalastyle.{CombinedAst, CombinedChecker, LineError, Lines, ScalastyleError}
 import org.scalastyle.scalariform.VisitorHelper.visit
 
-import scalariform.lexer.Tokens.CLASS
-
-import scalariform.lexer.{NoHiddenTokens, TokenType, HiddenTokens, Token}
+import scalariform.lexer.{HiddenTokens, NoHiddenTokens, Token}
 import scalariform.parser._
 
 /**
@@ -42,34 +36,15 @@ import scalariform.parser._
 class ScalaDocChecker extends CombinedChecker {
   protected val errorKey: String = "scaladoc"
 
-  val DefaultIgnoreRegex = "^$"
-
-  val skipPrivate = true
-  val skipQualifiedPrivate = false
-  val skipProtected = false
-  val skipQualifiedProtected = false
+  // parameters
+  lazy val ignoreRegex = getString("ignoreRegex", "^$")
+  lazy val skipPrivate = getBoolean("skipPrivate", defaultValue = true)
+  lazy val skipQualifiedPrivate = getBoolean("skipQualifiedPrivate", defaultValue = false)
+  lazy val skipProtected = getBoolean("skipProtected", defaultValue = false)
+  lazy val skipQualifiedProtected = getBoolean("skipQualifiedProtected", defaultValue = false)
 
   override def verify(ast: CombinedAst): List[ScalastyleError] = {
-    val tokens = ast.compilationUnit.tokens
-    val ignoreRegex = getString("ignoreRegex", DefaultIgnoreRegex)
-
-    def trimToTokenOfType(list: List[Token], tokenType: TokenType): List[Token] = {
-      if (list.isEmpty) {
-        list
-      } else {
-        list.head match {
-          case Token(`tokenType`, _, _, _) => list
-          case _ => trimToTokenOfType(list.tail, tokenType)
-        }
-      }
-    }
-
-    val ts = trimToTokenOfType(tokens, CLASS)
-    val ignore = !ts.isEmpty && ts(1).text.matches(ignoreRegex)
-    ignore match {
-      case true => Nil
-      case false => localVisit(skip = false, HiddenTokens(Nil), ast.lines)(ast.compilationUnit.immediateChildren(0))
-    }
+    localVisit(skip = false, NoHiddenTokens, ast.lines)(ast.compilationUnit.immediateChildren.head)
   }
 
   import ScalaDocChecker._ // scalastyle:ignore underscore.import import.grouping
@@ -152,8 +127,16 @@ class ScalaDocChecker extends CombinedChecker {
   private def returnErrors(line: Int, returnTypeOpt: Option[(Token, Type)])(scalaDoc: ScalaDoc): List[ScalastyleError] = {
     val needsReturn = returnTypeOpt.exists { case (_, tpe) => tpe.firstToken.text != "Unit" }
 
-    if (needsReturn && !scalaDoc.returns.isDefined) {
+    if (needsReturn && scalaDoc.returns.isEmpty) {
       List(LineError(line, List(MalformedReturn)))
+    } else {
+      Nil
+    }
+  }
+
+  private def bodyErrors(line: Int)(scalaDoc: ScalaDoc): List[ScalastyleError] = {
+    if (scalaDoc.text.isEmpty) {
+      List(LineError(line, List(Missing)))
     } else {
       Nil
     }
@@ -202,17 +185,22 @@ class ScalaDocChecker extends CombinedChecker {
       // class Foo, class Foo[A](a: A);
       // case class Foo(), case class Foo[A](a: A);
       // object Foo;
-      val (_, line) = lines.findLineAndIndex(t.firstToken.offset).get
+      if (t.name.text.matches(ignoreRegex)) {
+        Nil
+      } else {
+        val (_, line) = lines.findLineAndIndex(t.firstToken.offset).get
 
-      // we are checking parameters and type parameters
-      val errors = if (skip) Nil else findScalaDoc(t.firstToken, fallback).
-        map { scalaDoc =>
-          paramErrors(line, t.paramClausesOpt)(scalaDoc) ++
-          tparamErrors(line, t.typeParamClauseOpt)(scalaDoc)
-        }.getOrElse(List(LineError(line, List(Missing))))
+        // we are checking parameters and type parameters
+        val errors = if (skip) Nil else findScalaDoc(t.firstToken, fallback).
+          map { scalaDoc =>
+            bodyErrors(line)(scalaDoc) ++
+              paramErrors(line, t.paramClausesOpt)(scalaDoc) ++
+              tparamErrors(line, t.typeParamClauseOpt)(scalaDoc)
+          }.getOrElse(List(LineError(line, List(Missing))))
 
-      // and we descend, because we're interested in seeing members of the types
-      errors ++ visit(t, localVisit(skip, NoHiddenTokens, lines))
+        // and we descend, because we're interested in seeing members of the types
+        errors ++ visit(t, localVisit(skip, NoHiddenTokens, lines))
+      }
     case t: FunDefOrDcl  =>
       // def foo[A, B](a: Int): B = ...
       val (_, line) = lines.findLineAndIndex(t.firstToken.offset).get
@@ -220,9 +208,10 @@ class ScalaDocChecker extends CombinedChecker {
       // we are checking parameters, type parameters and returns
       val errors = if (skip) Nil else findScalaDoc(t.firstToken, fallback).
         map { scalaDoc =>
-          paramErrors(line, Some(t.paramClauses))(scalaDoc) ++
-          tparamErrors(line, t.typeParamClauseOpt)(scalaDoc) ++
-          returnErrors(line, t.returnTypeOpt)(scalaDoc)
+          bodyErrors(line)(scalaDoc) ++
+            paramErrors(line, Some(t.paramClauses))(scalaDoc) ++
+            tparamErrors(line, t.typeParamClauseOpt)(scalaDoc) ++
+            returnErrors(line, t.returnTypeOpt)(scalaDoc)
         }.
         getOrElse(List(LineError(line, List(Missing))))
 
@@ -232,9 +221,10 @@ class ScalaDocChecker extends CombinedChecker {
       // type Foo = ...
       val (_, line) = lines.findLineAndIndex(t.firstToken.offset).get
 
-      // error is non-existence
       val errors = if (skip) Nil else findScalaDoc(t.firstToken, fallback).
-        map(_ => Nil).
+        map { scalaDoc =>
+          bodyErrors(line)(scalaDoc)
+        }.
         getOrElse(List(LineError(line, List(Missing))))
 
       // we don't descend any further
@@ -245,16 +235,18 @@ class ScalaDocChecker extends CombinedChecker {
       // var a = ...
       val (_, line) = lines.findLineAndIndex(t.valOrVarToken.offset).get
       val errors = if (skip) Nil else findScalaDoc(t.firstToken, fallback).
-        map(_ => Nil).
+        map { scalaDoc =>
+          bodyErrors(line)(scalaDoc)
+        }.
         getOrElse(List(LineError(line, List(Missing))))
       // we don't descend any further
       errors
 
     case t: StatSeq =>
-      localVisit(skip, fallback, lines)(t.firstStatOpt) ++ (
-        for(statOpt <- t.otherStats)
-          yield localVisit(skip, statOpt._1.associatedWhitespaceAndComments, lines)(statOpt._2)
-        ).flatten
+      val otherStatsErrors = t.otherStats.flatMap { case (token, statOpt) =>
+        localVisit(skip, token.associatedWhitespaceAndComments, lines)(statOpt)
+      }
+      localVisit(skip, fallback, lines)(t.firstStatOpt) ++ otherStatsErrors
 
     case t: Any          =>
       // anything else, we descend (unless we stopped above)
@@ -278,21 +270,17 @@ object ScalaDocChecker {
    * Companion for the ScalaDoc object that parses its text to pick up its elements
    */
   private object ScalaDoc {
-    private val ParamRegex = "@param\\W+(\\w+)\\W+(.*)".r
-    private val TypeParamRegex = "@tparam\\W+(\\w+)\\W+(.*)".r
-    private val ReturnRegex = "@return\\W+(.*)".r
-
-    private val TagRegex = """\W*[*]\W+\@(\w+)\W+(\w+)(.*)""".r
+    private val TagRegex = """\@(\w+)\s+(\w+)(.*)""".r
 
     sealed trait ScalaDocLine {
       def isTag: Boolean
     }
-    case class TagSclaDocLine(tag: String, ref: String, rest: String) extends ScalaDocLine {
+    case class TagScalaDocLine(tag: String, ref: String, rest: String) extends ScalaDocLine {
       def isTag: Boolean = true
     }
     case class RawScalaDocLine(text: String) extends ScalaDocLine {
       def isTag: Boolean = false
-      override val toString = text.replaceFirst("\\*\\W+", "")
+      override val toString = text
     }
 
     /**
@@ -301,26 +289,27 @@ object ScalaDocChecker {
      * @return the parsed instance
      */
     def apply(raw: Token): ScalaDoc = {
-      val lines = raw.rawText.split("\\n").toList.flatMap(x => x.trim match {
-        case TagRegex(tag, ref, rest) => Some(TagSclaDocLine(tag, ref, rest))
-        case "/**"                    => None
-        case "*/"                     => None
-        case text: Any                => Some(RawScalaDocLine(text))
-      })
+      val lines = raw.rawText.trim.stripPrefix("/**").stripSuffix("*/").split("\\n").toList.map(_.trim.dropWhile(_ == '*').trim).map {
+        case TagRegex(tag, ref, rest) => TagScalaDocLine(tag, ref, rest)
+        case text                     => RawScalaDocLine(text)
+      }
+
+      val (textLines, tagLines) = lines.span(!_.isTag)
 
       def combineScalaDocFor[A](lines: List[ScalaDocLine], tag: String, f: (String, String) => A): List[A] = lines match {
-        case TagSclaDocLine(`tag`, ref, text)::ls =>
+        case TagScalaDocLine(`tag`, ref, text)::ls =>
           val rawLines = ls.takeWhile(!_.isTag)
-          f(ref, text + rawLines.mkString(" ")) :: combineScalaDocFor(ls.drop(rawLines.length), tag, f)
+          f(ref, (text + rawLines.mkString(" ")).trim) :: combineScalaDocFor(ls.drop(rawLines.length), tag, f)
         case _::ls => combineScalaDocFor(ls, tag, f)
         case Nil => Nil
       }
 
-      val params = combineScalaDocFor(lines, "param", ScalaDocParameter)
-      val typeParams = combineScalaDocFor(lines, "tparam", ScalaDocParameter)
-      val returns = combineScalaDocFor(lines, "return", _ + _).headOption
+      val text = textLines.map(_.toString).mkString(" ").trim
+      val params = combineScalaDocFor(tagLines, "param", ScalaDocParameter)
+      val typeParams = combineScalaDocFor(tagLines, "tparam", ScalaDocParameter)
+      val returns = combineScalaDocFor(tagLines, "return", _ + _).headOption
 
-      ScalaDoc(raw.rawText, params, typeParams, returns, None)
+      ScalaDoc(text, params, typeParams, returns, None)
     }
   }
 
